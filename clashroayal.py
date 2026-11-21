@@ -17,6 +17,47 @@ STARTER_CARDS = [
 ]
 CARD_GOLD_COST = 300
 
+CARD_UNLOCK_COSTS = {
+    "Обычная": 100,
+    "Редкая": 250,
+    "Эпичная": 500,
+    "Сверхредкая": 900,
+    "Легендарная": 1500,
+    "Супергеройская": 2500,
+}
+
+CARD_UPGRADE_COSTS = {
+    "Обычная": 40,
+    "Редкая": 75,
+    "Эпичная": 130,
+    "Сверхредкая": 220,
+    "Легендарная": 360,
+    "Супергеройская": 550,
+}
+
+
+def card_unlock_cost(card):
+    return CARD_UNLOCK_COSTS.get(CARDS[card]["rarity"], CARD_GOLD_COST)
+
+
+def card_upgrade_cost(card, level):
+    rarity = CARDS[card]["rarity"]
+    base_cost = CARD_UPGRADE_COSTS.get(rarity, CARD_GOLD_COST)
+    return base_cost * level
+
+
+def battle_gold_reward(trophies, won):
+    trophies = max(0, trophies)
+    if trophies < 100:
+        win_reward = 25 + round(trophies * 0.25)
+    elif trophies < 500:
+        win_reward = 50 + round((trophies - 100) * 0.25)
+    else:
+        win_reward = 150 + min(350, round((trophies - 500) * 0.125))
+    if won:
+        return min(500, win_reward)
+    return max(10, round(win_reward * 0.4))
+
 ARENA_THEMES = (
     "Зелёная долина", "Ледяная крепость", "Тёмный лес", "Песчаная арена",
     "Королевский замок", "Лавовая шахта", "Облачный порт", "Грибная чаща",
@@ -820,7 +861,7 @@ class ClashArena:
         cost_text = self.canvas.create_text(x+width-22, y+19, text=str(data["cost"]),
                                            fill="#fff4ff", font=("TkDefaultFont", 10, "bold"))
         if locked:
-            detail_text = "Закрыта • найди карту в сундуке"
+            detail_text = "Закрыта • сундук или покупка в коллекции"
         elif card == "Лечение":
             detail_text = f"Ур. {level}  •  заклинание  •  лечение 160"
         elif card == "Молния":
@@ -861,7 +902,7 @@ class ClashArena:
 
     def add_to_deck(self, card):
         if card not in self.unlocked_cards:
-            self.notice = "Сначала найди эту карту в сундуке."
+            self.notice = "Сначала найди карту в сундуке или купи её в коллекции."
         elif self.deck_edit_slot is not None:
             if card in self.battle_deck and self.battle_deck[self.deck_edit_slot] != card:
                 self.notice = "В колоде не может быть двух одинаковых карт."
@@ -940,6 +981,22 @@ class ClashArena:
         self.clear_canvas()
         self.canvas.create_text(480, 35, text="КОЛЛЕКЦИЯ И УЛУЧШЕНИЯ",
                                 fill="#fff1c4", font=("TkDefaultFont", 25, "bold"))
+        self.canvas.create_text(850, 35, text=f"ЗОЛОТО: {self.gold}",
+                                fill="#f3d37a", font=("TkDefaultFont", 11, "bold"))
+        rarity_price_text = " | ".join(
+            f"{rarity}: {CARD_UNLOCK_COSTS[rarity]} золота"
+            for rarity in ("Обычная", "Редкая", "Эпичная",
+                           "Сверхредкая", "Легендарная", "Супергеройская")
+        )
+        self.canvas.create_text(480, 60, text=rarity_price_text,
+                                fill="#d9d1b3", font=("TkDefaultFont", 8, "bold"))
+        upgrade_price_text = "Ул. (база × уровень): " + " | ".join(
+            f"{rarity}: {CARD_UPGRADE_COSTS[rarity]} золота"
+            for rarity in ("Обычная", "Редкая", "Эпичная",
+                           "Сверхредкая", "Легендарная", "Супергеройская")
+        )
+        self.canvas.create_text(480, 69, text=upgrade_price_text,
+                                fill="#c8bda0", font=("TkDefaultFont", 7, "bold"))
         cards_per_page = 20
         page_count = max(1, (len(CARDS) + cards_per_page - 1) // cards_per_page)
         self.collection_page = max(0, min(self.collection_page, page_count - 1))
@@ -958,7 +1015,10 @@ class ClashArena:
             level = self.card_levels.get(card, 1)
             status = f"{CARDS[card]['rarity']} • Ур.{level}"
             if not unlocked:
-                status = "ЗАКРЫТА • сундук"
+                status = (
+                    f"ЗАКРЫТА • {CARDS[card]['rarity']} • "
+                    f"{card_unlock_cost(card)} золота или сундук"
+                )
             self.canvas.create_text(x+8, y+14, anchor="w", text=card,
                                     fill="#302d26", font=("TkDefaultFont", 9, "bold"))
             self.canvas.create_text(x+8, y+34, anchor="w", text=status,
@@ -983,7 +1043,7 @@ class ClashArena:
         selected = self.upgrade_card
         if selected in CARDS:
             level = self.card_levels.get(selected, 1)
-            gold_cost = CARD_GOLD_COST * level
+            gold_cost = card_upgrade_cost(selected, level)
             if selected in self.unlocked_cards:
                 detail = f"{selected} • уровень {level} • улучшение за {gold_cost} золота"
                 self.button(760, 445, 910, 500, "ПРОФИЛЬ",
@@ -991,9 +1051,23 @@ class ClashArena:
                             lambda name=selected: self.show_card_profile(name),
                             outline="#e6f1dd", width=2)
             else:
-                detail = f"{selected} ещё не открыта — загляни в сундуки."
+                unlock_cost = card_unlock_cost(selected)
+                detail = f"{selected} • {CARDS[selected]['rarity']} • купить за {unlock_cost} золота или найти в сундуке"
             self.canvas.create_text(480, 405, text=detail, fill="#fff1c4",
                                     font=("TkDefaultFont", 10, "bold"))
+            if selected not in self.unlocked_cards:
+                unlock_cost = card_unlock_cost(selected)
+                can_buy = self.gold >= unlock_cost
+                button_text = (
+                    f"КУПИТЬ КАРТУ • {unlock_cost} ЗОЛОТА"
+                    if can_buy else f"НУЖНО {unlock_cost} ЗОЛОТА"
+                )
+                self.button(330, 465, 630, 521, button_text,
+                            "#f0ca6c" if can_buy else "#9c9b8c",
+                            "#342c23", self.buy_selected_card)
+                self.bottom_nav("collection")
+                self.apply_canvas_scale()
+                return
             can_upgrade = (
                 selected in self.unlocked_cards and level < 5
                 and self.gold >= gold_cost
@@ -1124,10 +1198,10 @@ class ClashArena:
     def upgrade_selected_card(self):
         card = self.upgrade_card
         if card not in self.unlocked_cards:
-            self.notice = "Сначала найди эту карту в сундуке."
+            self.notice = "Сначала найди карту в сундуке или купи её за золото."
         else:
             level = self.card_levels[card]
-            gold_cost = CARD_GOLD_COST * level
+            gold_cost = card_upgrade_cost(card, level)
             if level >= 5:
                 self.notice = "У карты уже максимальный уровень."
             elif self.gold < gold_cost:
@@ -1137,6 +1211,28 @@ class ClashArena:
                 self.card_levels[card] += 1
                 self.upgrades_done += 1
                 self.notice = f"«{card}» улучшена до уровня {self.card_levels[card]}!"
+                self.save()
+        self.show_collection()
+        if self.notice:
+            self.canvas.create_text(480*self.canvas_scale_x,
+                                    540*self.canvas_scale_y,
+                                    text=self.notice, fill="#8ff0a4",
+                                    font=("TkDefaultFont", 9, "bold"))
+
+    def buy_selected_card(self):
+        card = self.upgrade_card
+        if card not in CARDS:
+            self.notice = "Сначала выбери карту."
+        elif card in self.unlocked_cards:
+            self.notice = f"Карта «{card}» уже открыта."
+        else:
+            unlock_cost = card_unlock_cost(card)
+            if self.gold < unlock_cost:
+                self.notice = f"Нужно {unlock_cost} золота."
+            else:
+                self.gold -= unlock_cost
+                self.unlocked_cards.append(card)
+                self.notice = f"Карта «{card}» ({CARDS[card]['rarity']}) куплена за {unlock_cost} золота!"
                 self.save()
         self.show_collection()
         if self.notice:
@@ -2603,13 +2699,15 @@ class ClashArena:
         if won:
             self.wins += 1
             self.chests += 1
-            self.gold += 50
+            battle_reward = battle_gold_reward(self.trophies, True)
+            self.gold += battle_reward
             self.trophies += 30
-            self.last_reward = "Победа! +30 кубков, сундук и 50 золота."
+            self.last_reward = f"Победа! +30 кубков, сундук и {battle_reward} золота."
         else:
-            self.gold += 20
+            battle_reward = battle_gold_reward(self.trophies, False)
+            self.gold += battle_reward
             self.trophies = max(0, self.trophies - 15)
-            self.last_reward = "За бой получено 20 золота. Кубки: -15."
+            self.last_reward = f"За бой получено {battle_reward} золота. Кубки: -15."
         self.best_trophies = max(self.best_trophies, self.trophies)
         self.arena_index = arena_for_trophies(self.best_trophies)
         new_arenas = self.arena_index - previous_arena
