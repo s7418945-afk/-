@@ -58,6 +58,71 @@ def battle_gold_reward(trophies, won):
         return min(500, win_reward)
     return max(10, round(win_reward * 0.4))
 
+
+def battle_player_won(player_crowns, bot_crowns, player_elixir, bot_elixir,
+                      forced_winner=None):
+    if player_crowns >= 3 and bot_crowns < 3:
+        return True
+    if bot_crowns >= 3 and player_crowns < 3:
+        return False
+    if forced_winner is not None:
+        return forced_winner == "player"
+    if player_crowns != bot_crowns:
+        return player_crowns > bot_crowns
+    return player_elixir >= bot_elixir
+
+
+def overtime_timer_text(seconds):
+    if seconds <= 0:
+        return "РЕШАЮЩИЙ МОМЕНТ"
+    minutes, remaining_seconds = divmod(math.ceil(seconds), 60)
+    return f"ОВЕРТАЙМ  {minutes}:{remaining_seconds:02d}"
+
+
+def overtime_tower_winner(destroyed_sides, player_hp, bot_hp):
+    if destroyed_sides == {"bot"}:
+        return "player"
+    if destroyed_sides == {"player"}:
+        return "bot"
+    if player_hp > bot_hp:
+        return "player"
+    if bot_hp > player_hp:
+        return "bot"
+    return None
+
+
+def balanced_bot_deck(available_cards, player_deck, deck_size=8):
+    deck_size = min(deck_size, len(available_cards))
+    if deck_size == 0:
+        return []
+    target_cost = sum(CARDS[card]["cost"] for card in player_deck) / max(1, len(player_deck))
+    best_deck = random.sample(available_cards, deck_size)
+    best_difference = abs(
+        sum(CARDS[card]["cost"] for card in best_deck) / deck_size - target_cost
+    )
+    for _ in range(127):
+        candidate = random.sample(available_cards, deck_size)
+        average_cost = sum(CARDS[card]["cost"] for card in candidate) / deck_size
+        difference = abs(average_cost - target_cost)
+        if difference < best_difference:
+            best_deck = candidate
+            best_difference = difference
+            if difference <= 0.125:
+                break
+    return best_deck
+
+
+def accrue_battle_elixir(player_elixir, bot_elixir, gain):
+    player_elixir = min(ELIXIR_CAP, player_elixir + gain)
+    bot_elixir = min(ELIXIR_CAP, bot_elixir + gain, player_elixir)
+    return player_elixir, bot_elixir
+
+
+def tower_health_bar_y(tower):
+    size = 28 if tower.crown else 21
+    return tower.y+size+8 if tower.side == "bot" else tower.y-size-20
+
+
 ARENA_THEMES = (
     "Зелёная долина", "Ледяная крепость", "Тёмный лес", "Песчаная арена",
     "Королевский замок", "Лавовая шахта", "Облачный порт", "Грибная чаща",
@@ -116,8 +181,8 @@ CARDS = {
     "Копейщица": {"cost": 3, "hp": 300, "damage": 52, "speed": 40, "range": 90, "cooldown": 1.05, "size": 13, "color": "#b7b14c", "count": 1, "can_target_air": True},
     "Огненный шар": {"cost": 4, "hp": 0, "damage": 180, "speed": 0, "range": 75, "cooldown": 0, "size": 14, "color": "#e96a3a", "count": 1, "spell": True},
     "Фурри-фейерверк": {"cost": 4, "hp": 0, "damage": 172, "speed": 0, "range": 80, "cooldown": 0, "size": 14, "color": "#dc77b0", "count": 1, "spell": True, "spell_kind": "furry_fireball"},
-    "Хоббихорсерский таран": {"cost": 3, "hp": 0, "damage": 172, "speed": 0, "range": 80, "cooldown": 0, "size": 16, "color": "#b69a63", "count": 1, "spell": True, "spell_kind": "horse_fireball"},
-    "Копытный гул": {"cost": 2, "hp": 0, "damage": 210, "speed": 0, "range": 90, "cooldown": 0, "size": 14, "color": "#a99a67", "count": 1, "spell": True, "spell_kind": "horse_stun"},
+    "Хоббихорсерский таран": {"cost": 4, "hp": 0, "damage": 172, "speed": 0, "range": 80, "cooldown": 0, "size": 16, "color": "#b69a63", "count": 1, "spell": True, "spell_kind": "horse_fireball"},
+    "Копытный гул": {"cost": 3, "hp": 0, "damage": 180, "speed": 0, "range": 95, "cooldown": 0, "size": 14, "color": "#a99a67", "count": 1, "spell": True, "spell_kind": "horse_stun"},
     "Мур-регенерация": {"cost": 3, "hp": 0, "damage": -180, "speed": 0, "range": 95, "cooldown": 0, "size": 14, "color": "#77cf9b", "count": 1, "spell": True, "spell_kind": "furry_heal"},
     "Лечение": {"cost": 3, "hp": 0, "damage": -160, "speed": 0, "range": 90, "cooldown": 0, "size": 14, "color": "#67cf82", "count": 1, "spell": True},
     "Страж": {"cost": 4, "hp": 390, "damage": 54, "speed": 31, "range": 30, "cooldown": 1.0, "size": 15, "color": "#8f7357", "count": 1},
@@ -346,12 +411,15 @@ for index, (prefix, role) in enumerate(
     stats["hp"] = round(stats["hp"] * scale)
     stats["damage"] = round(stats["damage"] * (1.08 - (index % 5) * 0.04))
     stats["color"] = MEME_CARD_COLORS[index % len(MEME_CARD_COLORS)]
-    if prefix == "Хоббихорсер":
-        stats["speed"] = round(stats["speed"] * 1.05)
-        stats["cost"] = max(2, stats["cost"] - (1 if stats["cost"] >= 5 else 0))
     if "на самокате" in role or "пицца-рейдер" in role:
         stats["hp"] = 84
         stats["count"] = 2
+    if prefix == "Хоббихорсер" and stats["cost"] >= 3:
+        original_cost = stats["cost"]
+        stats["cost"] -= 1
+        efficiency_scale = stats["cost"] / original_cost
+        stats["hp"] = round(stats["hp"] * efficiency_scale)
+        stats["damage"] = round(stats["damage"] * efficiency_scale)
     CARDS[card_name] = stats
 
 CARDS["Фурри-медведь"] = {
@@ -364,12 +432,12 @@ CARDS["Фурри-страж"] = {
     "cooldown": 1.2, "size": 17, "color": "#7774a5", "count": 1,
 }
 CARDS["Хоббихорсер-медведь"] = {
-    "cost": 4, "hp": 720, "damage": 82, "speed": 30, "range": 30,
+    "cost": 4, "hp": 576, "damage": 66, "speed": 28, "range": 30,
     "cooldown": 1.25, "size": 19, "color": "#a88c62", "count": 1,
     "targets": "buildings",
 }
 CARDS["Хоббихорсер-боец"] = {
-    "cost": 3, "hp": 620, "damage": 72, "speed": 34, "range": 27,
+    "cost": 3, "hp": 465, "damage": 54, "speed": 31, "range": 27,
     "cooldown": 1.2, "size": 17, "color": "#87785f", "count": 1,
 }
 
@@ -387,6 +455,20 @@ CARDS["Сигма-кракен"] = {
     "cooldown": 1.67, "size": 18, "color": "#8f74cf", "count": 1,
     "splash": 67,
 }
+
+
+def elemental_type(card):
+    name = card.lower()
+    if any(token in name for token in ("огнен", "инферно", "адский дракон", "феникс")):
+        return "fire"
+    if any(token in name for token in ("ледян", "снежн")):
+        return "ice"
+    if any(token in name for token in ("электро", "молни")):
+        return "lightning"
+    if "кракен" in name:
+        return "water"
+    return None
+
 
 RARITY_TYPES = (
     ("Обычная", "#a9adb5"),
@@ -1098,6 +1180,236 @@ class ClashArena:
         return (f"{card} защищает дорожки с тех пор, как первая корона появилась "
                 "над Королевским замком. Каждый бой его история дополняется новой победой.")
 
+    def character_skin_style(self, card, data):
+        model = data.get("model", 0)
+        seed = sum(map(ord, card))
+        palette = ("#e4c56f", "#6ed3d7", "#e78c63", "#c296e5",
+                   "#a6d77c", "#f0a3b8", "#f0e5c4", "#79a8ed")
+        accent = palette[(seed + model*3) % len(palette)]
+        skin_palette = ("#e8c793", "#d79e78", "#efcfaa", "#a96f58", "#d7b1a0")
+        skin = skin_palette[seed % len(skin_palette)]
+        return accent, skin, (seed + model*3) % 6, (seed + model) % 6
+
+    def draw_character_face(self, card, data, x, y, size):
+        if size < 9:
+            return
+        accent, skin, face_style, head_style = self.character_skin_style(card, data)
+        line_width = max(1, round(size / 14))
+        self.canvas.create_oval(x-size*.48, y-size*.82,
+                    x+size*.48, y+size*.14,
+                    fill=skin, outline="#594638", width=line_width)
+        hat_top = y-size*.98
+        if head_style == 0:
+            self.canvas.create_rectangle(x-size*.3, y-size*.91,
+                                         x+size*.3, y-size*.72,
+                                         fill=accent, outline="#423a32", width=line_width)
+            self.canvas.create_line(x-size*.38, y-size*.72,
+                                    x+size*.38, y-size*.72,
+                                    fill="#eadbb2", width=line_width)
+        elif head_style == 1:
+            self.canvas.create_oval(x-size*.19, hat_top,
+                                    x+size*.19, y-size*.63,
+                                    fill=accent, outline="#423a32", width=line_width)
+        elif head_style == 2:
+            self.canvas.create_rectangle(x-size*.43, y-size*.78,
+                                         x+size*.43, y-size*.65,
+                                         fill=accent, outline="#423a32", width=line_width)
+            self.canvas.create_line(x-size*.35, y-size*.65,
+                                    x+size*.35, y-size*.65,
+                                    fill="#eadbb2", width=line_width)
+        elif head_style == 3:
+            self.canvas.create_arc(x-size*.42, y-size*.98,
+                                   x+size*.42, y-size*.35,
+                                   start=0, extent=180, style="arc",
+                                   outline=accent, width=max(2, line_width+1))
+        elif head_style == 4:
+            self.canvas.create_oval(x-size*.36, y-size*.9,
+                                    x+size*.36, y-size*.66,
+                                    fill="#55443d", outline=accent, width=line_width)
+            self.canvas.create_line(x-size*.35, y-size*.7,
+                                    x+size*.35, y-size*.7,
+                                    fill="#eadbb2", width=line_width)
+        else:
+            self.canvas.create_line(x-size*.38, y-size*.72,
+                                    x+size*.38, y-size*.72,
+                                    fill=accent, width=max(2, line_width+1))
+            self.canvas.create_oval(x-size*.06, hat_top,
+                                    x+size*.06, y-size*.82,
+                                    fill="#eadbb2", outline=accent, width=1)
+
+        eye_y = y-size*.53
+        eye_gap = size*.18
+        eye_radius = max(1, size*.055)
+        if face_style == 0:
+            for direction in (-1, 1):
+                eye_x = x+direction*eye_gap
+                self.canvas.create_oval(eye_x-eye_radius*1.35, eye_y-eye_radius*1.5,
+                                        eye_x+eye_radius*1.35, eye_y+eye_radius*1.5,
+                                        fill="#fff1d2", outline="#342e28", width=1)
+                self.canvas.create_oval(eye_x-eye_radius*.4, eye_y-eye_radius*.8,
+                                        eye_x+eye_radius*.5, eye_y+eye_radius*.8,
+                                        fill="#24201e", outline="")
+        elif face_style == 1:
+            for direction in (-1, 1):
+                self.canvas.create_line(x+direction*size*.29, eye_y-size*.09,
+                                        x+direction*size*.08, eye_y-size*.03,
+                                        fill="#342e28", width=line_width+1)
+            self.canvas.create_line(x-size*.1, y-size*.27,
+                                    x+size*.1, y-size*.27,
+                                    fill="#754c43", width=line_width)
+        elif face_style == 2:
+            for direction in (-1, 1):
+                eye_x = x+direction*eye_gap
+                self.canvas.create_rectangle(eye_x-size*.11, eye_y-size*.07,
+                                             eye_x+size*.11, eye_y+size*.07,
+                                             outline=accent, width=line_width+1)
+            self.canvas.create_line(x-size*.07, eye_y,
+                                    x+size*.07, eye_y,
+                                    fill=accent, width=line_width)
+        elif face_style == 3:
+            self.canvas.create_rectangle(x-size*.34, eye_y-size*.06,
+                                         x+size*.34, eye_y+size*.09,
+                                         fill="#55443d", outline=accent, width=line_width)
+        elif face_style == 4:
+            eye_x = x-eye_gap
+            self.canvas.create_oval(eye_x-eye_radius, eye_y-eye_radius,
+                                    eye_x+eye_radius, eye_y+eye_radius,
+                                    fill="#fff1d2", outline="#342e28")
+            self.canvas.create_line(x+eye_gap, eye_y-size*.08,
+                                    x+eye_gap, eye_y+size*.08,
+                                    fill="#342e28", width=line_width+1)
+            self.canvas.create_line(x-size*.32, eye_y+size*.16,
+                                    x-size*.08, eye_y-size*.04,
+                                    fill=accent, width=line_width+1)
+        else:
+            self.canvas.create_oval(x-eye_gap-eye_radius, eye_y-eye_radius,
+                                    x-eye_gap+eye_radius, eye_y+eye_radius,
+                                    fill="#24201e", outline="")
+            self.canvas.create_line(x+eye_gap-size*.06, eye_y,
+                                    x+eye_gap+size*.06, eye_y,
+                                    fill="#24201e", width=line_width+1)
+            self.canvas.create_arc(x-size*.12, y-size*.3,
+                                   x+size*.12, y-size*.15,
+                                   start=190, extent=160, style="arc",
+                                   outline="#754c43", width=line_width)
+
+    def draw_character_texture(self, card, data, x, y, size):
+        model = data.get("model", 0)
+        color, _, _, _ = self.character_skin_style(card, data)
+        style = model % 5
+        line_width = max(1, round(size / 18))
+        chest_top = y - size*.12
+        chest_bottom = y + size*.3
+        self.canvas.create_polygon(x-size*.2, chest_top,
+                                   x+size*.2, chest_top,
+                                   x+size*.18, y+size*.2,
+                                   x, chest_bottom,
+                                   x-size*.18, y+size*.2,
+                                   fill=data["color"], outline=color, width=line_width)
+        if style == 0:
+            for offset in (0, .13):
+                self.canvas.create_line(x-size*.13, y+size*offset,
+                                        x+size*.13, y+size*offset,
+                                        fill=color, width=line_width)
+        elif style == 1:
+            self.canvas.create_polygon(x, y-size*.04,
+                                       x+size*.12, y+size*.09,
+                                       x, y+size*.22,
+                                       x-size*.12, y+size*.09,
+                                       fill=color, outline="#342e28", width=line_width)
+            for rivet_x in (-.15, .15):
+                self.canvas.create_oval(x+size*rivet_x-size*.025, y+size*.08-size*.025,
+                                        x+size*rivet_x+size*.025, y+size*.08+size*.025,
+                                        fill="#f2dca0", outline="#342e28", width=line_width)
+        elif style == 2:
+            for dot_y in (0, .12, .24):
+                for dot_x in (-.1, .1):
+                    self.canvas.create_oval(x+size*dot_x-size*.025,
+                                            y+size*dot_y-size*.025,
+                                            x+size*dot_x+size*.025,
+                                            y+size*dot_y+size*.025,
+                                            fill=color, outline="")
+        elif style == 3:
+            for offset in (-.08, .08):
+                self.canvas.create_line(x+size*offset, y-size*.02,
+                                        x+size*offset, y+size*.23,
+                                        fill=color, width=line_width)
+        else:
+            self.canvas.create_rectangle(x-size*.1, y-size*.02,
+                                         x+size*.1, y+size*.2,
+                                         outline=color, width=line_width)
+            self.canvas.create_line(x-size*.07, y+size*.09,
+                                    x+size*.07, y+size*.09,
+                                     fill=color, width=line_width)
+
+    def draw_profile_weapon(self, x, y, size, color, direction, style, ranged):
+        hand_x = x + direction*size*.38
+        hand_y = y + size*.2
+        tip_x = x + direction*size*1.28
+        tip_y = y - size*.72
+        shaft_width = max(1, round(size/8))
+        detail_width = max(1, round(size/12))
+        if ranged and style == 0:
+            left, right = sorted((hand_x, tip_x))
+            self.canvas.create_arc(left, y-size*.95, right, y+size*.38,
+                                   start=285 if direction > 0 else 105,
+                                   extent=150, style="arc", outline=color, width=shaft_width)
+            self.canvas.create_line(hand_x, y-size*.8, hand_x, y+size*.3,
+                                    fill="#eee3bd", width=1)
+        elif ranged and style == 1:
+            self.canvas.create_line(hand_x, hand_y, tip_x, tip_y,
+                                    fill="#725338", width=shaft_width)
+            self.canvas.create_line(hand_x, hand_y-size*.18,
+                                    hand_x+direction*size*.5, hand_y-size*.18,
+                                    fill=color, width=detail_width)
+            self.canvas.create_line(hand_x, hand_y+size*.18,
+                                    hand_x+direction*size*.5, hand_y+size*.18,
+                                    fill=color, width=detail_width)
+        elif ranged and style in (2, 3):
+            self.canvas.create_line(hand_x, hand_y, tip_x, tip_y,
+                                    fill="#725338", width=shaft_width)
+            self.canvas.create_oval(tip_x-size*.12, tip_y-size*.12,
+                                    tip_x+size*.12, tip_y+size*.12,
+                                    fill=color, outline="#fff0b4", width=detail_width)
+            self.canvas.create_line(tip_x-size*.22, tip_y,
+                                    tip_x+size*.22, tip_y,
+                                    fill="#fff0b4", width=1)
+        elif style == 0:
+            self.canvas.create_polygon(hand_x-direction*size*.08, hand_y+size*.08,
+                                       hand_x+direction*size*.08, hand_y-size*.08,
+                                       tip_x, tip_y,
+                                       hand_x-direction*size*.04, hand_y+size*.16,
+                                       fill="#d9e3e3", outline="#514638", width=1)
+            self.canvas.create_line(hand_x-direction*size*.18, hand_y+size*.1,
+                                    hand_x+direction*size*.18, hand_y-size*.1,
+                                    fill=color, width=detail_width)
+        elif style == 1:
+            self.canvas.create_line(hand_x, hand_y, tip_x, tip_y,
+                                    fill="#725338", width=shaft_width)
+            self.canvas.create_polygon(tip_x-direction*size*.38, tip_y+size*.18,
+                                       tip_x, tip_y-size*.2,
+                                       tip_x+direction*size*.16, tip_y+size*.2,
+                                       fill=color, outline="#514638", width=detail_width)
+        elif style == 2:
+            self.canvas.create_line(hand_x, hand_y, tip_x, tip_y,
+                                    fill="#725338", width=shaft_width)
+            self.canvas.create_rectangle(tip_x-direction*size*.24, tip_y-size*.18,
+                                         tip_x+direction*size*.24, tip_y+size*.12,
+                                         fill=color, outline="#514638", width=detail_width)
+        elif style == 3:
+            self.canvas.create_line(hand_x, hand_y, tip_x, tip_y,
+                                    fill="#725338", width=shaft_width)
+            self.canvas.create_oval(tip_x-size*.16, tip_y-size*.16,
+                                    tip_x+size*.16, tip_y+size*.16,
+                                    fill=color, outline="#fff0b4", width=detail_width)
+        else:
+            self.canvas.create_line(hand_x, hand_y, tip_x, tip_y,
+                                    fill="#725338", width=shaft_width)
+            self.canvas.create_polygon(tip_x-direction*size*.13, tip_y+size*.12,
+                                       tip_x, tip_y-size*.25,
+                                       tip_x+direction*size*.13, tip_y+size*.12,
+                                       fill="#d9e3e3", outline="#514638")
+
     def draw_character_profile(self, card, level):
         if card not in self.unlocked_cards:
             return
@@ -1106,27 +1418,334 @@ class ClashArena:
         rarity_color = data.get("rarity_color", "#a9adb5")
         x, y = 210, 300
         size = 34
+        seed = sum(map(ord, card))
+        accent, skin, face_style, head_style = self.character_skin_style(card, data)
         self.canvas.create_oval(x-size-12, y+size+3, x+size+12, y+size+15,
                                 fill="#302c24", outline="")
-        self.canvas.create_polygon(x-size*.7, y-size*.3, x, y-size,
-                                   x+size*.7, y-size*.3, x+size*.7, y+size*.7,
-                                   x, y+size, x-size*.7, y+size*.7,
-                                   fill=data["color"], outline=rarity_color, width=3)
-        self.canvas.create_oval(x-size*.48, y-size*1.25,
-                                x+size*.48, y-size*.25,
-                                fill="#e8c793", outline=rarity_color, width=2)
-        if model % 3 == 0:
-            self.canvas.create_line(x, y-size*.3, x+size*1.25, y-size*1.15,
-                                    fill="#e8e0c3", width=5)
-        elif model % 3 == 1:
-            self.canvas.create_polygon(x-size*.5, y-size*.8,
-                                       x-size*.15, y-size*1.45,
-                                       x+size*.2, y-size*.8,
-                                       fill=rarity_color, outline="#f7edbf")
+        element = elemental_type(card)
+        if card.startswith("Хоббихорсер"):
+            self.canvas.create_line(x-size*.05, y+size*.05,
+                                    x-size*.02, y+size*1.35,
+                                    fill="#805b3d", width=7)
+            self.canvas.create_polygon(x-size*.55, y-size*.25,
+                                       x-size*.5, y+size*.85,
+                                       x+size*.55, y+size*.85,
+                                       x+size*.35, y-size*.3,
+                                       fill=data["color"], outline=rarity_color, width=3)
+            self.canvas.create_oval(x-size*.36, y-size*1.2,
+                                    x+size*.2, y-size*.62,
+                                    fill=skin, outline=rarity_color, width=2)
+            self.canvas.create_oval(x-size*.4, y-size*1.35,
+                                    x+size*.24, y-size*.98,
+                                    fill=accent, outline=rarity_color, width=2)
+            self.canvas.create_line(x-size*.38, y-size*1.05,
+                                    x+size*.22, y-size*1.05,
+                                    fill="#eadbb2", width=2)
+            self.canvas.create_oval(x+size*.25, y-size*.55,
+                                    x+size*1.12, y+size*.02,
+                                    fill="#d3b88a", outline="#594638", width=3)
+            self.canvas.create_polygon(x+size*.48, y-size*.48,
+                                       x+size*.6, y-size*1.03,
+                                       x+size*.73, y-size*.48,
+                                       x+size*.9, y-size*.92,
+                                       x+size*.98, y-size*.23,
+                                       fill="#594239", outline="#382f2a")
+            self.canvas.create_oval(x+size*.72, y-size*.43,
+                                    x+size*.82, y-size*.33,
+                                    fill="#211f1d", outline="")
+            self.canvas.create_line(x+size*.55, y-size*.15,
+                                    x+size*.98, y-size*.08,
+                                    fill="#603e31", width=3)
+            self.canvas.create_oval(x-size*.16, y-size*.98,
+                                    x-size*.08, y-size*.88,
+                                    fill="#29231f", outline="")
+            self.canvas.create_oval(x+size*.02, y-size*.98,
+                                    x+size*.1, y-size*.88,
+                                    fill="#29231f", outline="")
+            self.canvas.create_arc(x-size*.17, y-size*.86,
+                                   x+size*.12, y-size*.7,
+                                   start=190, extent=160, style="arc",
+                                   outline="#754c43", width=2)
+        elif card.startswith("Фурри") or card.startswith("Кот-батон") or "кот" in card.lower():
+            self.canvas.create_polygon(x-size*.55, y-size*.1,
+                                       x-size*.38, y+size*.82,
+                                       x+size*.38, y+size*.82,
+                                       x+size*.55, y-size*.1,
+                                       fill=data["color"], outline=rarity_color, width=3)
+            self.canvas.create_polygon(x-size*.43, y-size*.72,
+                                       x-size*.72, y-size*1.55,
+                                       x-size*.08, y-size*.98,
+                                       x+size*.08, y-size*.98,
+                                       x+size*.72, y-size*1.55,
+                                       x+size*.43, y-size*.72,
+                                       fill=data["color"], outline=rarity_color, width=2)
+            self.canvas.create_oval(x-size*.55, y-size*1.2,
+                                    x+size*.55, y-size*.1,
+                                    fill="#dfc79d", outline=rarity_color, width=2)
+            self.canvas.create_polygon(x-size*.28, y-size*.1,
+                                       x+size*.28, y-size*.1,
+                                       x, y+size*.2,
+                                       fill="#f0d7c9", outline="#594638")
+            for eye_x in (-size*.2, size*.2):
+                eye_height = .16 if face_style in (1, 4) else .19
+                self.canvas.create_oval(x+eye_x-size*.055, y-size*.68,
+                                        x+eye_x+size*.055, y-size*.68+size*eye_height,
+                                        fill="#24201e", outline="")
+                self.canvas.create_line(x+eye_x-size*.08, y-size*.73,
+                                        x+eye_x+size*.08, y-size*.76,
+                                        fill="#594638", width=2)
+            self.canvas.create_polygon(x-size*.07, y-size*.08,
+                                       x+size*.07, y-size*.08,
+                                       x, y+size*.02,
+                                       fill="#d67883", outline="")
+            self.canvas.create_arc(x-size*.1, y-size*.1,
+                                   x+size*.1, y+size*.16,
+                                   start=205 if face_style % 2 else 15,
+                                   extent=140, style="arc",
+                                   outline="#754c43", width=2)
+            if face_style in (2, 5):
+                self.canvas.create_oval(x-size*.36, y-size*.22,
+                                        x-size*.29, y-size*.15,
+                                        fill=accent, outline="")
+                self.canvas.create_oval(x+size*.29, y-size*.22,
+                                        x+size*.36, y-size*.15,
+                                        fill=accent, outline="")
+            self.canvas.create_arc(x+size*.28, y-size*.05,
+                                   x+size*1.1, y+size*.75,
+                                   start=100, extent=250, style="arc",
+                                   outline=data["color"], width=5)
+        elif element == "fire":
+            self.canvas.create_polygon(x-size*.8, y+size*.8,
+                                       x-size*.65, y-size*.1,
+                                       x-size*.3, y-size*.55,
+                                       x-size*.12, y-size*1.5,
+                                       x+size*.28, y-size*.75,
+                                       x+size*.52, y-size*1.2,
+                                       x+size*.82, y-size*.25,
+                                       x+size*.65, y+size*.8,
+                                       fill="#d94f32", outline="#ffbe55", width=3)
+            self.canvas.create_polygon(x-size*.38, y+size*.58,
+                                       x-size*.18, y-size*.18,
+                                       x+size*.05, y-size*.62,
+                                       x+size*.3, y-size*.15,
+                                       x+size*.4, y+size*.58,
+                                       fill="#ffb43f", outline="#ffe58a", width=2)
+            self.canvas.create_oval(x-size*.12, y+size*.05,
+                                    x+size*.12, y+size*.28,
+                                    fill="#fff1b1", outline="")
+        elif element == "ice":
+            self.canvas.create_polygon(x, y-size*1.25,
+                                       x+size*.8, y-size*.45,
+                                       x+size*.62, y+size*.62,
+                                       x, y+size,
+                                       x-size*.62, y+size*.62,
+                                       x-size*.8, y-size*.45,
+                                       fill="#73bedb", outline="#e5fbff", width=3)
+            self.canvas.create_polygon(x-size*.18, y-size*.15,
+                                       x-size*.6, y-size*.85,
+                                       x-size*.28, y-size*.72,
+                                       x, y-size*1.18,
+                                       x+size*.25, y-size*.7,
+                                       x+size*.62, y-size*.9,
+                                       x+size*.28, y-size*.12,
+                                       fill="#b9efff", outline="#f2ffff", width=2)
+            for eye_x in (-size*.18, size*.18):
+                self.canvas.create_oval(x+eye_x-size*.05, y-size*.1,
+                                        x+eye_x+size*.05, y+size*.04,
+                                        fill="#264f70", outline="")
+        elif element == "lightning":
+            self.canvas.create_polygon(x+size*.12, y-size*1.35,
+                                       x-size*.48, y-size*.22,
+                                       x-size*.06, y-size*.22,
+                                       x-size*.28, y+size*.95,
+                                       x+size*.55, y-size*.18,
+                                       x+size*.12, y-size*.18,
+                                       x+size*.42, y-size*1.35,
+                                       fill="#5b9fe6", outline="#e5fbff", width=3)
+            self.canvas.create_line(x-size*.78, y-size*.62,
+                                    x-size*.46, y-size*.45,
+                                    x-size*.66, y-size*.2,
+                                    fill="#b6edff", width=4)
+            self.canvas.create_line(x+size*.62, y+size*.25,
+                                    x+size*.38, y+size*.42,
+                                    x+size*.72, y+size*.7,
+                                    fill="#b6edff", width=4)
+        elif element == "water":
+            self.canvas.create_oval(x-size*.65, y-size*.95,
+                                    x+size*.65, y+size*.05,
+                                    fill="#567fc4", outline="#b9e8ff", width=3)
+            self.canvas.create_oval(x-size*.35, y-size*.66,
+                                    x+size*.35, y-size*.08,
+                                    fill="#80c9e8", outline="#e6faff", width=2)
+            for tentacle in (-1, 0, 1):
+                start_x = x + tentacle * size*.35
+                self.canvas.create_line(start_x, y-size*.05,
+                                        start_x+tentacle*size*.35, y+size*.52,
+                                        start_x+tentacle*size*.18, y+size,
+                                        fill="#6574c8", width=7, smooth=True)
+            self.canvas.create_oval(x-size*.1, y-size*.48,
+                                    x-size*.02, y-size*.37,
+                                    fill="#fff3c1", outline="")
+            self.canvas.create_oval(x+size*.02, y-size*.48,
+                                    x+size*.1, y-size*.37,
+                                    fill="#fff3c1", outline="")
         else:
-            self.canvas.create_oval(x-size*.8, y-size*.75,
-                                    x-size*.25, y-size*.2,
-                                    fill=data["color"], outline=rarity_color)
+            body_style = model % 6
+            if body_style == 0:
+                self.canvas.create_polygon(x-size*.68, y-size*.05,
+                                           x-size*.48, y+size*.8,
+                                           x, y+size,
+                                           x+size*.48, y+size*.8,
+                                           x+size*.68, y-size*.05,
+                                           fill=data["color"], outline=rarity_color, width=3)
+            elif body_style == 1:
+                self.canvas.create_oval(x-size*.7, y-size*.12,
+                                        x+size*.7, y+size*.9,
+                                        fill=data["color"], outline=rarity_color, width=3)
+            elif body_style == 2:
+                self.canvas.create_rectangle(x-size*.62, y-size*.05,
+                                             x+size*.62, y+size*.92,
+                                             fill=data["color"], outline=rarity_color, width=3)
+            elif body_style == 3:
+                self.canvas.create_polygon(x-size*.8, y+size*.05,
+                                           x-size*.45, y-size*.2,
+                                           x+size*.45, y-size*.2,
+                                           x+size*.8, y+size*.05,
+                                           x+size*.5, y+size*.9,
+                                           x-size*.5, y+size*.9,
+                                           fill=data["color"], outline=rarity_color, width=3)
+            elif body_style == 4:
+                self.canvas.create_polygon(x-size*.55, y-size*.15,
+                                           x+size*.55, y-size*.15,
+                                           x+size*.72, y+size*.22,
+                                           x+size*.38, y+size*.98,
+                                           x-size*.38, y+size*.98,
+                                           x-size*.72, y+size*.22,
+                                           fill=data["color"], outline=rarity_color, width=3)
+            else:
+                self.canvas.create_polygon(x-size*.76, y+size*.02,
+                                           x-size*.3, y-size*.2,
+                                           x+size*.3, y-size*.2,
+                                           x+size*.76, y+size*.02,
+                                           x+size*.36, y+size*.95,
+                                           x-size*.36, y+size*.95,
+                                           fill=data["color"], outline=rarity_color, width=3)
+
+            face_x, face_y = x, y-size*.76
+            self.canvas.create_oval(face_x-size*.47, face_y-size*.52,
+                                    face_x+size*.47, face_y+size*.52,
+                                    fill=skin, outline=rarity_color, width=2)
+            if head_style == 0:
+                self.canvas.create_polygon(x-size*.43, face_y-size*.35,
+                                           x-size*.24, face_y-size*.95,
+                                           x+size*.06, face_y-size*.52,
+                                           x+size*.36, face_y-size*.93,
+                                           x+size*.43, face_y-size*.32,
+                                           fill=accent, outline="#514638", width=2)
+            elif head_style == 1:
+                for side in (-1, 1):
+                    self.canvas.create_polygon(x+side*size*.3, face_y-size*.25,
+                                               x+side*size*.62, face_y-size*.93,
+                                               x+side*size*.12, face_y-size*.48,
+                                               fill=accent, outline="#514638", width=2)
+            elif head_style == 2:
+                self.canvas.create_oval(x-size*.52, face_y-size*.72,
+                                        x+size*.52, face_y-size*.2,
+                                        fill=accent, outline="#514638", width=2)
+                self.canvas.create_line(x-size*.5, face_y-size*.2,
+                                        x+size*.5, face_y-size*.2,
+                                        fill="#eadbb2", width=2)
+            elif head_style == 3:
+                self.canvas.create_polygon(x-size*.48, face_y-size*.24,
+                                           x-size*.4, face_y-size*.75,
+                                           x-size*.12, face_y-size*.48,
+                                           x+size*.08, face_y-size*.88,
+                                           x+size*.22, face_y-size*.47,
+                                           x+size*.48, face_y-size*.72,
+                                           x+size*.48, face_y-size*.2,
+                                           fill=accent, outline="#514638", width=2)
+            elif head_style == 4:
+                self.canvas.create_line(x-size*.44, face_y-size*.18,
+                                        x+size*.44, face_y-size*.18,
+                                        fill=accent, width=4)
+                self.canvas.create_oval(x-size*.09, face_y-size*.32,
+                                        x+size*.09, face_y-size*.08,
+                                        fill="#f2d879", outline="#514638")
+            else:
+                self.canvas.create_oval(x-size*.54, face_y-size*.5,
+                                        x+size*.54, face_y-size*.16,
+                                        fill=accent, outline="#514638", width=2)
+
+            eye_y = face_y-size*.02
+            if face_style == 0:
+                for eye_x in (-.2, .2):
+                    self.canvas.create_oval(x+size*(eye_x-.07), eye_y-size*.09,
+                                            x+size*(eye_x+.07), eye_y+size*.1,
+                                            fill="#fff4d6", outline="#342e28")
+                    self.canvas.create_oval(x+size*(eye_x-.025), eye_y-size*.04,
+                                            x+size*(eye_x+.04), eye_y+size*.07,
+                                            fill="#24201e", outline="")
+                self.canvas.create_arc(x-size*.13, face_y+size*.13,
+                                       x+size*.13, face_y+size*.32,
+                                       start=190, extent=160, style="arc",
+                                       outline="#754c43", width=2)
+            elif face_style == 1:
+                self.canvas.create_line(x-size*.31, eye_y,
+                                        x-size*.08, eye_y-size*.04,
+                                        fill="#342e28", width=4)
+                self.canvas.create_line(x+size*.08, eye_y-size*.04,
+                                        x+size*.31, eye_y,
+                                        fill="#342e28", width=4)
+                self.canvas.create_line(x-size*.12, face_y+size*.22,
+                                        x+size*.12, face_y+size*.22,
+                                        fill="#754c43", width=2)
+            elif face_style == 2:
+                for eye_x in (-.2, .2):
+                    self.canvas.create_oval(x+size*(eye_x-.075), eye_y-size*.08,
+                                            x+size*(eye_x+.075), eye_y+size*.08,
+                                            outline="#342e28", width=2)
+                self.canvas.create_line(x-size*.3, eye_y-size*.16,
+                                        x+size*.3, eye_y-size*.16,
+                                        fill=accent, width=3)
+            elif face_style == 3:
+                self.canvas.create_rectangle(x-size*.36, eye_y-size*.08,
+                                             x+size*.36, eye_y+size*.12,
+                                             fill="#55443d", outline=accent, width=2)
+                self.canvas.create_line(x-size*.12, face_y+size*.25,
+                                        x+size*.12, face_y+size*.25,
+                                        fill="#d9c9ad", width=2)
+            elif face_style == 4:
+                for eye_x in (-.2, .2):
+                    self.canvas.create_oval(x+size*(eye_x-.06), eye_y-size*.07,
+                                            x+size*(eye_x+.06), eye_y+size*.07,
+                                            fill="#24201e", outline="")
+                self.canvas.create_line(x-size*.08, face_y+size*.18,
+                                        x+size*.22, face_y+size*.22,
+                                        fill="#754c43", width=2)
+                self.canvas.create_line(x-size*.37, face_y-size*.02,
+                                        x-size*.05, face_y+size*.12,
+                                        fill=accent, width=2)
+            else:
+                self.canvas.create_oval(x-size*.28, eye_y-size*.08,
+                                        x-size*.08, eye_y+size*.09,
+                                        fill="#24201e", outline="")
+                self.canvas.create_line(x+size*.08, eye_y,
+                                        x+size*.3, eye_y,
+                                        fill="#342e28", width=3)
+                self.canvas.create_line(x-size*.12, face_y+size*.24,
+                                        x+size*.13, face_y+size*.18,
+                                        fill="#754c43", width=2)
+
+        if not data.get("spell") and not data.get("flying"):
+            self.draw_character_texture(card, data, x, y+size*.35, size)
+            is_horse = card.startswith("Хоббихорсер")
+            is_furry = (card.startswith("Фурри") or card.startswith("Кот-батон")
+                        or "кот" in card.lower())
+            if element != "water" and not data.get("flying"):
+                self.draw_profile_weapon(
+                    x, y, size, accent, -1 if is_horse or is_furry else 1,
+                    (seed + model*5) % 5, data["range"] > 55,
+                )
 
         self.canvas.create_text(210, 160, text=card,
                                 fill="#fff1c4", font=("TkDefaultFont", 16, "bold"))
@@ -1479,16 +2098,65 @@ class ClashArena:
     def track_mouse(self, event):
         self.mouse_x, self.mouse_y = self.design_point(event.x, event.y)
 
+    def deployment_zone_contains(self, side, x, y, lane):
+        expanded_lanes = (self.player_expanded_lanes if side == "player"
+                          else self.bot_expanded_lanes)
+        expanded = lane in expanded_lanes
+        if not (135 <= x <= 825):
+            return False
+        if expanded:
+            lane_bounds = (135 <= x <= 470 if lane == 0 else 490 <= x <= 825)
+            if not lane_bounds:
+                return False
+            y_bounds = (255 <= y <= 515 if side == "player"
+                        else 84 <= y <= 342)
+        else:
+            y_bounds = (350 <= y <= 515 if side == "player"
+                        else 115 <= y <= 245)
+        if not y_bounds:
+            return False
+        return not (258 <= y <= 342 and abs(x - BRIDGES[lane]) > 34)
+
+    def bot_spawn_position(self, lane, data):
+        expanded = lane in self.bot_expanded_lanes
+        spread = math.ceil(max(
+            (abs((index - (data["count"] - 1) / 2) * 20)
+             for index in range(data["count"])),
+            default=0,
+        ))
+        margin = data["size"] + spread + 2
+        x_min, x_max = ((135 + margin, 470 - margin) if lane == 0
+                        else (490 + margin, 825 - margin))
+        if x_min > x_max:
+            return None
+        y_min, y_max = (84, 342) if expanded else (115, 245)
+        for _ in range(64):
+            x = random.randint(x_min, x_max)
+            y = random.randint(y_min, y_max)
+            if not self.deployment_zone_contains("bot", x, y, lane):
+                continue
+            blocked = any(
+                tower.hp > 0
+                and math.hypot(tower.x - x, tower.y - y)
+                < tower.radius + data["size"] + 5
+                for tower in self.towers
+            )
+            if not blocked:
+                return x, y
+        return None
+
     def start_game(self):
         arena = ARENAS[self.arena_index]
         self.bot_name = random.choice(BOT_NAMES)
-        self.bot_level = random.randint(1, 5)
+        self.bot_level = 1 if self.mode == "furry_horse" else random.randint(1, 5)
         meme_cards = [
             name for name in CARDS
             if not CARDS[name].get("spell")
             and (name.startswith(tuple(MEME_CARD_PREFIXES))
                  or name in ("67-Мем-стример", "Кринж-кот", "Сигма-кракен"))
         ]
+        paired_bot_deck = None
+        paired_bot_levels = None
         if self.mode == "furry_horse":
             furry_cards = [name for name in CARDS
                            if (name.startswith("Фурри") or name.startswith("Кот-батон"))
@@ -1508,31 +2176,41 @@ class ClashArena:
                                "Хоббихорсер повелитель носков", "Хоббихорсер звёздный стажёр"]
             furry_cards = [name for name in furry_cards if name in CARDS]
             horse_cards = [name for name in horse_cards if name in CARDS]
-
-            def balanced_deck(cards):
-                tanks = [name for name in cards
-                         if CARDS[name]["hp"] >= 600
-                         or CARDS[name].get("targets") == "buildings"]
-                small = [name for name in cards
-                         if CARDS[name]["hp"] <= 140
-                         and name not in tanks]
-                medium = [name for name in cards
-                          if name not in tanks and name not in small]
-                tank_pick = random.sample(tanks, min(2, len(tanks)))
-                small_pick = random.sample(small, min(3, len(small)))
-                medium_pick = random.sample(medium, min(6 - len(tank_pick) - len(small_pick), len(medium)))
-                remaining = 6 - len(tank_pick) - len(small_pick) - len(medium_pick)
-                used = set(tank_pick + small_pick + medium_pick)
-                extra = [name for name in cards if name not in used]
-                medium_pick += random.sample(extra, min(remaining, len(extra)))
-                return tank_pick + small_pick + medium_pick
-
+            furry_by_role = {
+                name.removeprefix("Фурри "): name
+                for name in furry_cards if name.startswith("Фурри ")
+            }
+            horse_by_role = {
+                name.removeprefix("Хоббихорсер "): name
+                for name in horse_cards if name.startswith("Хоббихорсер ")
+            }
+            matching_roles = sorted(furry_by_role.keys() & horse_by_role.keys())
+            selected_roles = random.sample(matching_roles, 6)
+            furry_units = [furry_by_role[role] for role in selected_roles]
+            horse_units = [horse_by_role[role] for role in selected_roles]
             if self.furry_vs_horse_side == "furry":
-                player_meme_deck = balanced_deck(furry_cards) + ["Фурри-фейерверк", "Мур-регенерация"]
-                available_cards = horse_cards + ["Хоббихорсерский таран", "Копытный гул"]
+                player_meme_deck = furry_units + ["Фурри-фейерверк", "Мур-регенерация"]
+                paired_bot_deck = horse_units + ["Хоббихорсерский таран", "Копытный гул"]
+                paired_bot_levels = {
+                    horse_by_role[role]: self.card_levels.get(furry_by_role[role], 1)
+                    for role in selected_roles
+                }
+                paired_bot_levels.update({
+                    "Хоббихорсерский таран": self.card_levels.get("Фурри-фейерверк", 1),
+                    "Копытный гул": self.card_levels.get("Мур-регенерация", 1),
+                })
             else:
-                player_meme_deck = balanced_deck(horse_cards) + ["Хоббихорсерский таран", "Копытный гул"]
-                available_cards = furry_cards + ["Фурри-фейерверк", "Мур-регенерация"]
+                player_meme_deck = horse_units + ["Хоббихорсерский таран", "Копытный гул"]
+                paired_bot_deck = furry_units + ["Фурри-фейерверк", "Мур-регенерация"]
+                paired_bot_levels = {
+                    furry_by_role[role]: self.card_levels.get(horse_by_role[role], 1)
+                    for role in selected_roles
+                }
+                paired_bot_levels.update({
+                    "Фурри-фейерверк": self.card_levels.get("Хоббихорсерский таран", 1),
+                    "Мур-регенерация": self.card_levels.get("Копытный гул", 1),
+                })
+            available_cards = paired_bot_deck
         elif self.mode == "meme" and len(meme_cards) >= 8:
             available_cards = meme_cards
             player_meme_deck = random.sample(meme_cards, 8)
@@ -1543,12 +2221,18 @@ class ClashArena:
                 if not CARDS[name].get("spell") and name not in meme_names
             ]
             player_meme_deck = None
-        self.bot_deck = random.sample(available_cards, min(8, len(available_cards)))
-        self.bot_card_levels = {
+        self.bot_deck = (
+            paired_bot_deck[:] if paired_bot_deck is not None else
+            balanced_bot_deck(
+                available_cards,
+                player_meme_deck if player_meme_deck is not None else self.battle_deck,
+            )
+        )
+        self.bot_card_levels = (paired_bot_levels if paired_bot_levels is not None else {
             card: random.randint(max(1, self.bot_level - 1),
                                  min(5, self.bot_level + 1))
             for card in self.bot_deck
-        }
+        })
         self.canvas.configure(bg=arena[1])
         self.clear_canvas()
         self.running = True
@@ -1599,6 +2283,10 @@ class ClashArena:
             elif 330 <= x <= 630 and 342 <= y <= 392:
                 self.show_menu()
             return
+        if self.overtime:
+            self.selected_card = None
+            self.notice = "В овертайме новые войска не выставляются."
+            return
 
         if not self.selected_card:
             if 535 <= y <= 590 and 255 <= x < 255 + 4*120:
@@ -1615,12 +2303,7 @@ class ClashArena:
         data = CARDS[card]
         inside_field = 130 <= x <= 830 and 70 <= y <= 530
         lane = 0 if x < 480 else 1
-        own_deployment = 350 <= y <= 515
-        if lane in self.player_expanded_lanes:
-            lane_ok = (135 <= x <= 470 if lane == 0 else 490 <= x <= 825)
-            own_deployment = lane_ok and 255 <= y <= 515
-        else:
-            own_deployment = 135 <= x <= 825 and own_deployment
+        own_deployment = self.deployment_zone_contains("player", x, y, lane)
         spell_target = data.get("spell") and inside_field and not 265 <= y <= 335
         can_place = spell_target if data.get("spell") else own_deployment and 135 <= x <= 825
         if not can_place:
@@ -1636,7 +2319,7 @@ class ClashArena:
             self.cast_spell(card, x, y)
         else:
             blocked = any(
-                tower.side == "player" and tower.hp > 0
+                tower.hp > 0
                 and math.hypot(tower.x-x, tower.y-y)
                 < tower.radius + data["size"] + 5
                 for tower in self.towers
@@ -1691,13 +2374,12 @@ class ClashArena:
             for target in self.units:
                 if (target.side == "bot" and target.hp > 0
                         and math.hypot(target.x-x, target.y-y) <= data["range"] + target.size):
-                    strike = 210 if getattr(target, "max_hp", 0) <= 140 else damage
-                    self.damage_target(target, strike)
-                    target.slow_timer = max(target.slow_timer, 4.5)
+                    self.damage_target(target, damage)
+                    target.slow_timer = max(target.slow_timer, 2.5)
             for tower in self.towers:
                 if (tower.side == "bot" and tower.hp > 0
                         and math.hypot(tower.x-x, tower.y-y) <= data["range"] + tower.radius):
-                    self.damage_target(tower, 210)
+                    self.damage_target(tower, damage)
             self.effects.append({"x": x, "y": y, "life": 0.6,
                                  "color": data["color"], "radius": data["range"]})
             return
@@ -1819,44 +2501,22 @@ class ClashArena:
                 self.units = []
                 self.projectiles = []
                 self.selected_card = None
-                player_towers = [t for t in self.towers if t.side == "player" and t.hp > 0]
-                bot_towers = [t for t in self.towers if t.side == "bot" and t.hp > 0]
-                player_hp = sum(t.hp for t in player_towers) / max(1, len(player_towers))
-                bot_hp = sum(t.hp for t in bot_towers) / max(1, len(bot_towers))
-                self.overtime_drain_side = (
-                    "player" if player_hp < bot_hp else
-                    "bot" if bot_hp < player_hp else None
-                )
-                self.notice = "ФИНАЛЬНАЯ СУДЬБА: бойцы исчезли"
-        elif self.overtime_drain_side:
-            self.overtime_drain_tick += dt
-            if self.overtime_drain_tick >= 1:
-                self.overtime_drain_tick -= 1
-                for tower in [t for t in self.towers
-                              if t.side == self.overtime_drain_side and t.hp > 0]:
-                    tower.hp -= 40
-                    if tower.hp <= 0:
-                        self.forced_winner = "bot" if tower.side == "player" else "player"
-                        self.end_game(self.forced_winner)
-                        return
-        elif self.overtime_drain_side is None:
-            self.overtime_drain_tick += dt
-            if self.overtime_drain_tick >= 1:
-                self.overtime_drain_tick -= 1
-                for tower in [t for t in self.towers if t.hp > 0]:
-                    tower.hp -= 40
-                    if tower.hp <= 0:
-                        self.forced_winner = "bot" if tower.side == "player" else "player"
-                        self.end_game(self.forced_winner)
-                        return
+                player_hp = sum(max(0, tower.hp) for tower in self.towers
+                                if tower.side == "player")
+                bot_hp = sum(max(0, tower.hp) for tower in self.towers
+                             if tower.side == "bot")
+                self.end_game(overtime_tower_winner(set(), player_hp, bot_hp))
+                return
         elixir_speed = 3.0 if self.mode == "meme" else (
             2.0 if self.overtime or self.time_left <= 60 else 1.0
         )
         elixir_gain = dt * elixir_speed / 2.8
-        self.player_elixir = min(ELIXIR_CAP, self.player_elixir + elixir_gain)
-        self.bot_elixir = min(ELIXIR_CAP, self.bot_elixir + elixir_gain)
+        self.player_elixir, self.bot_elixir = accrue_battle_elixir(
+            self.player_elixir, self.bot_elixir, elixir_gain
+        )
 
-        if random.random() < dt * 0.24 and self.bot_elixir >= 2 and len(self.units) < MAX_UNITS:
+        if (not self.overtime and random.random() < dt * 0.24
+            and self.bot_elixir >= 2 and len(self.units) < MAX_UNITS):
             affordable = [name for name in self.bot_deck
                           if not CARDS[name].get("spell")
                           and CARDS[name]["cost"] <= self.bot_elixir
@@ -1864,54 +2524,69 @@ class ClashArena:
             if affordable:
                 card = random.choice(affordable)
                 data = CARDS[card]
-                lane = random.choice((0, 1))
-                x = 200 if lane == 0 else 760
-                y = (random.randint(355, 515) if lane in self.bot_expanded_lanes
-                     else random.randint(115, 245))
-                for i in range(data["count"]):
-                    level = self.bot_card_levels.get(card, self.bot_level)
-                    self.units.append(Unit(x+(i-1)*20, y+i*8, "bot", card, lane, level))
-                    self.on_unit_spawn(self.units[-1])
-                self.bot_elixir -= data["cost"]
-        if random.random() < dt * 0.03 and self.bot_elixir >= 4:
+                for lane in random.sample((0, 1), 2):
+                    position = self.bot_spawn_position(lane, data)
+                    if position:
+                        break
+                if position:
+                    x, y = position
+                    for index in range(data["count"]):
+                        offset = (index - (data["count"] - 1) / 2) * 20
+                        level = self.bot_card_levels.get(card, self.bot_level)
+                        self.units.append(Unit(x+offset, y, "bot", card, lane, level))
+                        self.on_unit_spawn(self.units[-1])
+                    self.bot_elixir -= data["cost"]
+        spell_cost_threshold = 3 if self.mode == "furry_horse" else 4
+        if (not self.overtime and random.random() < dt * 0.03
+            and self.bot_elixir >= spell_cost_threshold):
             player_units = [u for u in self.units if u.side == "player"]
             if player_units:
                 target = random.choice(player_units)
                 if self.mode == "furry_horse":
                     if self.furry_vs_horse_side == "furry":
-                        bot_spell = "Хоббихорсерский таран" if random.random() < 0.5 else "Копытный гул"
+                        bot_spells = ("Хоббихорсерский таран", "Копытный гул")
                     else:
-                        bot_spell = "Фурри-фейерверк" if random.random() < 0.5 else "Мур-регенерация"
+                        bot_spells = ("Фурри-фейерверк", "Мур-регенерация")
+                    affordable_spells = [
+                        spell for spell in bot_spells
+                        if CARDS[spell]["cost"] <= self.bot_elixir
+                    ]
+                    bot_spell = random.choice(affordable_spells)
                     bot_data = CARDS[bot_spell]
+                    bot_spell_level = self.bot_card_levels.get(bot_spell, 1)
+                    bot_spell_damage = round(
+                        bot_data["damage"] * (1 + 0.07 * (bot_spell_level - 1))
+                    )
                     if bot_spell in ("Хоббихорсерский таран", "Фурри-фейерверк"):
                         self.launch_spell_projectile(
                             "horse_fireball" if bot_spell == "Хоббихорсерский таран" else "furry_fireball",
                             target.x, target.y, bot_data["range"],
-                            bot_data["damage"], bot_data["color"], side="bot",
+                            bot_spell_damage, bot_data["color"], side="bot",
                         )
                     elif bot_spell == "Копытный гул":
                         for player_unit in player_units:
-                            if math.hypot(player_unit.x-target.x, player_unit.y-target.y) <= bot_data["range"]:
-                                strike = 210 if getattr(player_unit, "max_hp", 0) <= 140 else bot_data["damage"]
-                                self.damage_target(player_unit, strike)
-                                player_unit.slow_timer = max(player_unit.slow_timer, 4.5)
+                            if math.hypot(player_unit.x-target.x, player_unit.y-target.y) <= bot_data["range"] + player_unit.size:
+                                self.damage_target(player_unit, bot_spell_damage)
+                                player_unit.slow_timer = max(player_unit.slow_timer, 2.5)
                         for tower in self.towers:
                             if (tower.side == "player" and tower.hp > 0
                                     and math.hypot(tower.x-target.x, tower.y-target.y)
                                     <= bot_data["range"] + tower.radius):
-                                self.damage_target(tower, 210)
+                                self.damage_target(tower, bot_spell_damage)
                         self.effects.append({"x": target.x, "y": target.y, "life": 0.6,
                                              "color": bot_data["color"], "radius": bot_data["range"]})
                     elif bot_spell == "Мур-регенерация":
                         bot_units = [u for u in self.units if u.side == "bot" and u.hp > 0]
-                        if bot_units:
-                            heal_target = random.choice(bot_units)
-                            heal_target.hp = min(heal_target.max_hp, heal_target.hp + 180)
-                            self.effects.append({"x": heal_target.x, "y": heal_target.y, "life": 0.6,
-                                                 "color": bot_data["color"], "radius": bot_data["range"]})
+                        for bot_unit in bot_units:
+                            if math.hypot(bot_unit.x-target.x, bot_unit.y-target.y) <= bot_data["range"] + bot_unit.size:
+                                bot_unit.hp = min(bot_unit.max_hp, bot_unit.hp + 180)
+                        self.effects.append({"x": target.x, "y": target.y, "life": 0.6,
+                                             "color": bot_data["color"], "radius": bot_data["range"]})
                 else:
                     self.enemy_cast_spell(target.x, target.y)
-                self.bot_elixir -= 4
+                self.bot_elixir -= (
+                    bot_data["cost"] if self.mode == "furry_horse" else 4
+                )
 
         for unit in self.units[:]:
             if unit.lifetime is not None:
@@ -2143,8 +2818,13 @@ class ClashArena:
             if effect["life"] <= 0:
                 self.effects.remove(effect)
 
+        destroyed_king_sides = set()
+        destroyed_tower_sides = set()
         for tower in self.towers[:]:
             if tower.hp <= 0 and tower in self.towers:
+                destroyed_tower_sides.add(tower.side)
+                if tower.crown:
+                    destroyed_king_sides.add(tower.side)
                 if tower.side == "player":
                     self.bot_crowns = min(3, self.bot_crowns + (3 if tower.crown else 1))
                 elif tower.side == "bot":
@@ -2164,8 +2844,29 @@ class ClashArena:
                 self.effects.append({"x": tower.x, "y": tower.y, "life": 1.0,
                                      "color": "#d9b46a", "radius": 55})
 
+        if destroyed_king_sides == {"player"}:
+            self.end_game("bot")
+            return
+        if destroyed_king_sides == {"bot"}:
+            self.end_game("player")
+            return
+        if destroyed_king_sides == {"player", "bot"}:
+            self.end_game()
+            return
+        if self.overtime and destroyed_tower_sides:
+            player_hp = sum(max(0, tower.hp) for tower in self.towers
+                            if tower.side == "player")
+            bot_hp = sum(max(0, tower.hp) for tower in self.towers
+                         if tower.side == "bot")
+            self.end_game(overtime_tower_winner(
+                destroyed_tower_sides, player_hp, bot_hp
+            ))
+            return
         if self.player_crowns >= 3 or self.bot_crowns >= 3:
             self.end_game()
+            return
+        if self.forced_winner:
+            self.end_game(self.forced_winner)
             return
         if self.overtime:
             return
@@ -2280,6 +2981,8 @@ class ClashArena:
             self.canvas.create_line(x-4, y-2, x+3, y-2, fill="#d0c9a4")
 
         # Deployment zones and invalid river surface.
+        self.canvas.create_rectangle(128, 115, 832, 245, outline="#e5b7a9",
+                         dash=(4, 5), width=1)
         self.canvas.create_rectangle(128, 350, 832, 516, outline="#bed7ab",
                                      dash=(4, 5), width=1)
         if hasattr(self, "player_expanded_lanes"):
@@ -2294,15 +2997,18 @@ class ClashArena:
                 self.canvas.create_rectangle(x1, 84, x2, 342,
                                              fill="#e58d7d", stipple="gray25",
                                              outline="#ffd3ca", dash=(6, 4), width=2)
+        self.canvas.create_line(128, 245, 832, 245, fill="#e5b7a9", dash=(7, 5))
         self.canvas.create_line(128, 350, 832, 350, fill="#dce8c6", dash=(7, 5))
 
         if self.selected_card:
             card_data = CARDS[self.selected_card]
             is_spell = card_data.get("spell", False)
-            valid = (130 <= self.mouse_x <= 830 and 70 <= self.mouse_y <= 530
-                     and not 265 <= self.mouse_y <= 335) if is_spell else (
-                         135 <= self.mouse_x <= 825 and 350 <= self.mouse_y <= 515
-                     )
+            lane = 0 if self.mouse_x < 480 else 1
+            valid = ((130 <= self.mouse_x <= 830 and 70 <= self.mouse_y <= 530
+                      and not 265 <= self.mouse_y <= 335) if is_spell else
+                     self.deployment_zone_contains(
+                         "player", self.mouse_x, self.mouse_y, lane
+                     ))
             color = "#82ed99" if valid else "#f07669"
             radius = card_data["range"] if is_spell else card_data["size"]
             self.canvas.create_oval(self.mouse_x-radius, self.mouse_y-radius,
@@ -2348,14 +3054,17 @@ class ClashArena:
                 self.canvas.create_oval(x+20, y-size-18, x+29, y-size-9,
                                         fill="#9a8b73", outline="#eee0b6")
 
-            bar_width = 56 if tower.crown else 46
-            bar_y = y-size-20
-            self.canvas.create_rectangle(x-bar_width/2, bar_y, x+bar_width/2, bar_y+6,
-                                         fill="#342e28", outline="#eadfbd")
+            bar_width = 62 if tower.crown else 54
+            bar_y = tower_health_bar_y(tower)
+            self.canvas.create_rectangle(x-bar_width/2, bar_y,
+                                         x+bar_width/2, bar_y+7,
+                                         fill="#242622", outline="#f1e4c4", width=1)
             hp_fraction = max(0, tower.hp/tower.max_hp)
-            self.canvas.create_rectangle(x-bar_width/2+1, bar_y+1,
-                                         x-bar_width/2+1+(bar_width-2)*hp_fraction,
-                                         bar_y+5, fill="#7bd576", outline="")
+            self.canvas.create_rectangle(x-bar_width/2+2, bar_y+2,
+                                         x-bar_width/2+2+(bar_width-4)*hp_fraction,
+                                         bar_y+5,
+                                         fill="#7bd576" if hp_fraction > .35 else "#e47b68",
+                                         outline="")
             if self.show_hitboxes:
                 self.canvas.create_oval(x-tower.radius, y-tower.radius,
                                         x+tower.radius, y+tower.radius,
@@ -2371,6 +3080,7 @@ class ClashArena:
             player_side = unit.side == "player"
             body = HERO_SKINS[self.skin_index][1] if player_side and unit.card == "Рыцарь" else unit.color
             trim_color = "#9ec8f4" if player_side else "#f09b87"
+            element = elemental_type(unit.card)
             if unit.stats.get("ice_aura"):
                 self.canvas.create_oval(x-78, y-78, x+78, y+78,
                                         outline="#a8edff", dash=(2, 5), width=2)
@@ -2409,10 +3119,58 @@ class ClashArena:
                 self.canvas.create_oval(x-size*.8, y-size*.85,
                                         x-size*.15, y-size*.2,
                                         fill="#e3c18d", outline="#594638")
+                if element == "fire":
+                    self.canvas.create_polygon(x-size*.35, y+size*.3,
+                                               x-size*.7, y-size*.2,
+                                               x-size*.35, y-size*.3,
+                                               x-size*.25, y-size*.85,
+                                               x+size*.05, y-size*.25,
+                                               x+size*.38, y-size*.55,
+                                               x+size*.55, y+size*.18,
+                                               fill="#e85c36", outline="#ffd16b", width=2)
+                    self.canvas.create_polygon(x-size*.18, y+size*.15,
+                                               x-size*.06, y-size*.35,
+                                               x+size*.2, y+size*.15,
+                                               fill="#ffe58a", outline="")
+                elif element == "ice":
+                    self.canvas.create_polygon(x, y-size*.95,
+                                               x-size*.35, y-size*.35,
+                                               x, y-size*.48,
+                                               x+size*.38, y-size*.25,
+                                               fill="#a9edff", outline="#efffff", width=2)
+                    self.canvas.create_polygon(x-size*.68, y-size*.1,
+                                               x-size*.95, y-size*.55,
+                                               x-size*.38, y-size*.25,
+                                               fill="#73bedb", outline="#efffff")
+                elif element == "lightning":
+                    for direction in (-1, 1):
+                        self.canvas.create_line(
+                            x+direction*size*.55, y-size*.55,
+                            x+direction*size*1.05, y-size*.15,
+                            x+direction*size*.72, y+size*.12,
+                            x+direction*size*1.18, y+size*.55,
+                            fill="#e4faff", width=2,
+                        )
+                elif element == "water":
+                    for direction in (-1, 1):
+                        self.canvas.create_line(
+                            x+direction*size*.25, y+size*.3,
+                            x+direction*size*.58, y+size*.85,
+                            x+direction*size*.92, y+size*.55,
+                            fill="#80c9e8", width=3, smooth=True,
+                        )
             else:
                 model = unit.stats.get("model", 0)
+                is_elemental_model = element in ("fire", "ice", "lightning", "water")
                 if unit.card.startswith("Хоббихорсер"):
                     horse_body = "#b6a079"
+                    stick_color = "#805b3d"
+                    self.canvas.create_line(x-size*.08, y+size*.2,
+                                            x-size*.02, y+size*1.35,
+                                            fill=stick_color, width=max(3, size*.22))
+                    self.canvas.create_line(x-size*.32, y+size*.62,
+                                            x+size*.24, y+size*.68,
+                                            fill="#d5bd8c", width=2)
                     self.canvas.create_oval(x-size*.95, y-size*.35,
                                             x+size*.95, y+size*.55,
                                             fill=horse_body, outline=trim_color, width=2)
@@ -2420,6 +3178,24 @@ class ClashArena:
                                                x+size*1.35, y-size*.75,
                                                x+size*1.15, y-size*.05,
                                                fill=horse_body, outline=trim_color)
+                    self.canvas.create_polygon(x+size*.98, y-size*.43,
+                                               x+size*1.13, y-size*.9,
+                                               x+size*1.25, y-size*.42,
+                                               x+size*1.43, y-size*.78,
+                                               x+size*1.43, y-size*.25,
+                                               fill="#594239", outline="#382f2a")
+                    self.canvas.create_oval(x+size*1.05, y-size*.58,
+                                            x+size*1.43, y-size*.23,
+                                            fill="#d3b88a", outline="#594638", width=2)
+                    self.canvas.create_oval(x+size*1.12, y-size*.58,
+                                            x+size*1.2, y-size*.5,
+                                            fill="#211f1d", outline="")
+                    self.canvas.create_line(x+size*.85, y-size*.48,
+                                            x+size*1.4, y-size*.35,
+                                            fill="#603e31", width=2)
+                    self.canvas.create_line(x+size*1.25, y-size*.34,
+                                            x+size*.58, y+size*.8,
+                                            fill="#603e31", width=2)
                     for leg_x in (-size*.65, size*.65):
                         self.canvas.create_line(x+leg_x, y+size*.35,
                                                 x+leg_x-size*.12, y+size*1.15,
@@ -2427,11 +3203,17 @@ class ClashArena:
                     self.canvas.create_oval(x-size*.22, y-size*.95,
                                             x+size*.22, y-size*.35,
                                             fill="#e8c793", outline=trim_color, width=2)
-                    self.canvas.create_polygon(x-size*.18, y-size*.75,
+                    self.canvas.create_polygon(x-size*.5, y-size*.45,
+                                               x-size*.65, y+size*.55,
+                                               x+size*.56, y+size*.55,
+                                               x+size*.25, y-size*.48,
+                                               fill=body, outline=trim_color, width=2)
+                    self.canvas.create_polygon(x-size*.18, y-size*.77,
                                                x-size*.55, y-size*1.25,
                                                x+size*.12, y-size*.75,
                                                fill=body, outline=trim_color)
-                elif unit.card.startswith("Фурри") or unit.card.startswith("Кот-батон"):
+                elif (unit.card.startswith("Фурри") or unit.card.startswith("Кот-батон")
+                      or "кот" in unit.card.lower()):
                     self.canvas.create_polygon(x-size*.45, y-size*.15,
                                                x-size*.15, y-size*.85,
                                                x+size*.15, y-size*.85,
@@ -2448,15 +3230,41 @@ class ClashArena:
                                                    x+ear_x-size*.24, ear_y-size*.62,
                                                    x+ear_x+size*.16, ear_y-size*.18,
                                                    fill=body, outline=trim_color)
-                    self.canvas.create_oval(x-size*.27, y-size*.82,
-                                            x+size*.27, y-size*.45,
-                                            fill="#4b3b34", outline="")
-                    self.canvas.create_oval(x-size*.12, y-size*.63,
-                                            x-size*.02, y-size*.53,
+                        self.canvas.create_polygon(x+ear_x-size*.11, ear_y-size*.13,
+                                                   x+ear_x-size*.2, ear_y-size*.43,
+                                                   x+ear_x+size*.04, ear_y-size*.2,
+                                                   fill="#e994a8", outline="")
+                    self.canvas.create_oval(x-size*.34, y-size*.78,
+                                            x-size*.02, y-size*.48,
+                                            fill="#f0d7c9", outline="")
+                    self.canvas.create_oval(x+size*.02, y-size*.78,
+                                            x+size*.34, y-size*.48,
+                                            fill="#f0d7c9", outline="")
+                    self.canvas.create_oval(x-size*.27, y-size*.91,
+                                            x-size*.13, y-size*.72,
                                             fill="#fff1b9", outline="")
-                    self.canvas.create_oval(x+size*.02, y-size*.63,
-                                            x+size*.12, y-size*.53,
+                    self.canvas.create_oval(x+size*.13, y-size*.91,
+                                            x+size*.27, y-size*.72,
                                             fill="#fff1b9", outline="")
+                    self.canvas.create_oval(x-size*.22, y-size*.88,
+                                            x-size*.17, y-size*.77,
+                                            fill="#24201e", outline="")
+                    self.canvas.create_oval(x+size*.17, y-size*.88,
+                                            x+size*.22, y-size*.77,
+                                            fill="#24201e", outline="")
+                    self.canvas.create_polygon(x-size*.08, y-size*.48,
+                                               x+size*.08, y-size*.48,
+                                               x, y-size*.38,
+                                               fill="#d67883", outline="")
+                    self.canvas.create_line(x, y-size*.38, x, y-size*.3,
+                                            fill="#594638", width=1)
+                    for whisker_y in (-.43, -.32):
+                        self.canvas.create_line(x-size*.18, y+size*whisker_y,
+                                                x-size*.56, y+size*(whisker_y-.08),
+                                                fill="#594638", width=1)
+                        self.canvas.create_line(x+size*.18, y+size*whisker_y,
+                                                x+size*.56, y+size*(whisker_y-.08),
+                                                fill="#594638", width=1)
                     self.canvas.create_line(x-size*.5, y+size*.25,
                                             x-size*.9, y+size*.95,
                                             fill=body, width=4)
@@ -2467,6 +3275,90 @@ class ClashArena:
                                            x+size*1.25, y+size*.75,
                                            start=90, extent=150,
                                            style="arc", outline=body, width=5)
+                elif element == "fire":
+                    self.canvas.create_polygon(x-size*.7, y+size*.85,
+                                               x-size*.55, y-size*.15,
+                                               x-size*.3, y-size*.65,
+                                               x-size*.08, y-size*1.35,
+                                               x+size*.2, y-size*.65,
+                                               x+size*.48, y-size*1.05,
+                                               x+size*.72, y-size*.1,
+                                               x+size*.62, y+size*.85,
+                                               fill="#d94f32", outline="#ffc45b", width=2)
+                    self.canvas.create_polygon(x-size*.3, y+size*.55,
+                                               x-size*.12, y-size*.08,
+                                               x+size*.08, y-size*.5,
+                                               x+size*.32, y-size*.02,
+                                               x+size*.38, y+size*.55,
+                                               fill="#ffb43f", outline="#ffe58a")
+                    self.canvas.create_oval(x-size*.23, y-size*.82,
+                                            x+size*.23, y-size*.35,
+                                            fill="#f2bd78", outline="#723d30", width=2)
+                    self.canvas.create_oval(x-size*.13, y-size*.66,
+                                            x-size*.06, y-size*.57,
+                                            fill="#39211e", outline="")
+                    self.canvas.create_oval(x+size*.06, y-size*.66,
+                                            x+size*.13, y-size*.57,
+                                            fill="#39211e", outline="")
+                elif element == "ice":
+                    self.canvas.create_polygon(x, y-size*1.18,
+                                               x+size*.82, y-size*.46,
+                                               x+size*.56, y+size*.65,
+                                               x, y+size,
+                                               x-size*.56, y+size*.65,
+                                               x-size*.82, y-size*.46,
+                                               fill="#73bedb", outline="#e5fbff", width=2)
+                    self.canvas.create_polygon(x-size*.68, y-size*.36,
+                                               x-size*1.1, y-size*.93,
+                                               x-size*.28, y-size*.65,
+                                               x, y-size*1.4,
+                                               x+size*.3, y-size*.65,
+                                               x+size*1.08, y-size*.97,
+                                               x+size*.66, y-size*.27,
+                                               fill="#b9efff", outline="#f2ffff", width=2)
+                    for eye_x in (-size*.2, size*.2):
+                        self.canvas.create_oval(x+eye_x-size*.05, y-size*.12,
+                                                x+eye_x+size*.05, y+size*.02,
+                                                fill="#264f70", outline="")
+                elif element == "lightning":
+                    self.canvas.create_polygon(x-size*.53, y-size*.75,
+                                               x+size*.45, y-size*1.05,
+                                               x+size*.05, y-size*.12,
+                                               x+size*.62, y-size*.15,
+                                               x-size*.42, y+size*.85,
+                                               x-size*.12, y+size*.12,
+                                               x-size*.72, y+size*.2,
+                                               fill="#528ed6", outline="#e5fbff", width=2)
+                    for direction in (-1, 1):
+                        self.canvas.create_line(
+                            x+direction*size*.5, y-size*.4,
+                            x+direction*size*1.05, y-size*.12,
+                            x+direction*size*.62, y+size*.15,
+                            x+direction*size*1.12, y+size*.52,
+                            fill="#b8f1ff", width=2,
+                        )
+                    self.canvas.create_oval(x-size*.06, y-size*.55,
+                                            x+size*.06, y-size*.42,
+                                            fill="#fff9bb", outline="")
+                elif element == "water":
+                    self.canvas.create_oval(x-size*.58, y-size*.86,
+                                            x+size*.58, y+size*.05,
+                                            fill="#567fc4", outline="#b9e8ff", width=2)
+                    self.canvas.create_oval(x-size*.29, y-size*.57,
+                                            x+size*.29, y-size*.02,
+                                            fill="#80c9e8", outline="#e6faff")
+                    for tentacle in (-2, -1, 0, 1, 2):
+                        start_x = x + tentacle * size*.2
+                        self.canvas.create_line(
+                            start_x, y,
+                            start_x+tentacle*size*.12, y+size*.58,
+                            start_x+tentacle*size*.08, y+size,
+                            fill="#6574c8", width=3, smooth=True,
+                        )
+                    for eye_x in (-size*.12, size*.12):
+                        self.canvas.create_oval(x+eye_x-size*.04, y-size*.45,
+                                                x+eye_x+size*.04, y-size*.34,
+                                                fill="#fff3c1", outline="")
                 elif model % 6 == 0:
                     self.canvas.create_polygon(x-size*.8, y, x-size*.35, y-size,
                                                x+size*.35, y-size, x+size*.8, y,
@@ -2510,9 +3402,13 @@ class ClashArena:
                                                x+size*.9, y+size*.8,
                                                fill=body, outline=trim_color, width=2)
                 head_size = max(5, size*.48)
-                self.canvas.create_oval(x-head_size, y-size*.82,
-                                        x+head_size, y-size*.82+head_size*2,
-                                        fill="#e3c18d", outline="#594638", width=1)
+                is_furry = (unit.card.startswith("Фурри")
+                            or unit.card.startswith("Кот-батон")
+                            or "кот" in unit.card.lower())
+                if not is_furry and not is_elemental_model:
+                    self.canvas.create_oval(x-head_size, y-size*.82,
+                                            x+head_size, y-size*.82+head_size*2,
+                                            fill="#e3c18d", outline="#594638", width=1)
                 self.canvas.create_arc(x-size, y-size*.65, x+size, y+size*.85,
                                        start=190, extent=160, style="arc",
                                        outline="#f5d477", width=2)
@@ -2521,12 +3417,37 @@ class ClashArena:
                                                x, y-size*1.35,
                                                x+size*.65, y-size*.65,
                                                fill="#d4c09a", outline="#514638")
-                if unit.range > 55 or unit.card in ("Рыцарь", "Страж", "Великан", "Тролль"):
-                    self.canvas.create_line(x+size*.35, y, x+size*1.25, y-size*.8,
-                                            fill="#e8d8ae", width=3)
-                    self.canvas.create_line(x+size*.95, y-size*.65,
-                                            x+size*1.25, y-size*.8,
-                                            fill=trim_color, width=2)
+            is_furry = (unit.card.startswith("Фурри")
+                        or unit.card.startswith("Кот-батон")
+                        or "кот" in unit.card.lower())
+            is_horse = unit.card.startswith("Хоббихорсер")
+            if (not unit.is_building and not unit.flying
+                    and not is_furry and not is_horse and not is_elemental_model):
+                self.draw_character_face(unit.card, unit.stats, x, y, size)
+            if not unit.is_building and not unit.flying:
+                accent, _, _, _ = self.character_skin_style(unit.card, unit.stats)
+                if element != "water":
+                    self.draw_profile_weapon(
+                        x, y, size, accent, -1 if is_horse or is_furry else 1,
+                        (sum(map(ord, unit.card))
+                         + unit.stats.get("model", 0)*5) % 5,
+                        unit.range > 55,
+                    )
+                self.draw_character_texture(
+                    unit.card, unit.stats, x, y+size*.1, size
+                )
+
+            if unit.card == "67-Мем-стример":
+                for trail_index in range(3):
+                    trail_y = y-size*(1.15 + trail_index*.75) + math.sin(
+                        unit.walk_phase + trail_index*1.7) * size*.35
+                    trail_x = x + math.cos(unit.walk_phase + trail_index*2) * size*.9
+                    self.canvas.create_text(trail_x, trail_y, text="67",
+                                            fill="#263c52",
+                                            font=("TkDefaultFont", max(8, int(size*.75)+2), "bold"))
+                    self.canvas.create_text(trail_x, trail_y, text="67",
+                                            fill="#67d9ff",
+                                            font=("TkDefaultFont", max(8, int(size*.75)), "bold"))
 
             health_width = max(28, size*2.7)
             bar_y = y-size-12
@@ -2609,8 +3530,13 @@ class ClashArena:
         self.canvas.create_rectangle(0, 0, WIDTH, 65, fill="#292722", outline="#d5bc83", width=2)
         self.canvas.create_text(215, 22, text=f"ВАШИ КОРОНЫ  {self.player_crowns}",
                                 fill="#92c5fa", font=("TkDefaultFont", 12, "bold"))
-        timer_text = ((f"ОВЕРТАЙМ  {max(0, int(self.overtime_left))}") if self.overtime else
-                      f"{max(0, int(self.time_left//60))}:{max(0, int(self.time_left%60)):02d}")
+        if self.overtime:
+            timer_text = overtime_timer_text(self.overtime_left)
+        else:
+            timer_text = (
+                f"{max(0, int(self.time_left//60))}:"
+                f"{max(0, int(self.time_left%60)):02d}"
+            )
         self.canvas.create_text(480, 21, text=timer_text,
                                 fill="#fff0c2", font=("TkDefaultFont", 20, "bold"))
         self.canvas.create_text(745, 22, text=f"{self.bot_name}  Ур.{self.bot_level}  {self.bot_crowns}",
@@ -2687,14 +3613,10 @@ class ClashArena:
         self.screen = "result"
         self.battles_played += 1
         self.crowns_earned += self.player_crowns
-        if forced_winner is not None:
-            won = forced_winner == "player"
-        elif self.player_crowns > self.bot_crowns:
-            won = True
-        elif self.player_crowns == self.bot_crowns:
-            won = self.player_elixir >= self.bot_elixir
-        else:
-            won = False
+        won = battle_player_won(
+            self.player_crowns, self.bot_crowns,
+            self.player_elixir, self.bot_elixir, forced_winner,
+        )
         previous_arena = self.arena_index
         if won:
             self.wins += 1
